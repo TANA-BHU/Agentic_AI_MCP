@@ -1,0 +1,34 @@
+[
+  {
+    "task": "read about transformers",
+    "completed": true
+  },
+  {
+    "task": "study transformers",
+    "completed": true
+  },
+  {
+    "task": "read about RAG for 1 hour",
+    "completed": true
+  },
+  {
+    "task": "read about DSA",
+    "completed": false
+  },
+  {
+    "task": "read about the LLMS",
+    "completed": false
+  },
+  {
+    "task": "read about DSA",
+    "completed": false
+  },
+  {
+    "task": "read math",
+    "completed": false
+  },
+  {
+    "task": "study math",
+    "completed": false
+  }
+]
