@@ -1,10 +1,14 @@
 [
   {
     "task": "read about transformers",
-    "completed": false
+    "completed": true
   },
   {
     "task": "study transformers",
-    "completed": false
+    "completed": true
+  },
+  {
+    "task": "read about RAG for 1 hour",
+    "completed": true
   }
 ]

@@ -1,173 +1,108 @@
 import os
 from pathlib import Path
-
 from dotenv import load_dotenv
-from groq import Groq
-
+from langchain_groq import ChatGroq
+from langchain.agents import create_agent
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-
-
-# ============================================================
-# ENV
-# ============================================================
+from langchain_mcp_adapters.tools import load_mcp_tools
 
 load_dotenv()
-client = Groq(api_key=os.environ["GROQ_API_KEY"])
 
-
-# ============================================================
-# LOAD SKILL
-# ============================================================
-
-SKILL_FILE = (
-    Path(__file__).parent.parent
-    / "skills"
-    / "task_management"
-    / "skill.md"
-)
-
+SKILL_FILE = Path(__file__).parent.parent / "skills" / "task_management" / "skill.md"
 
 def load_skill():
-
     with open(SKILL_FILE, "r") as f:
         return f.read()
 
+server_params = StdioServerParameters(
+    command="python",
+    args=["-m", "mcp_server.server"]
+)
 
-# ============================================================
-# MCP SERVER CONFIGURATION
-# ============================================================
-
-server_params = StdioServerParameters(command="python", args=["-m","mcp_server.server"])
-
-# ============================================================
-# AGENT
-# ============================================================
-
-async def run_agent(user_query: str):
-
+async def run_agent(user_query):
     skill = load_skill()
 
     system_prompt = f"""
-                    You are a task management AI agent.
+You are a task management AI agent.
 
-                    Follow the following skill:
+Follow these task management rules:
 
-                    --------------------------------
-                    {skill}
-                    --------------------------------
+{skill}
 
-                    Use the available MCP tools whenever
-                    the user's request requires interacting
-                    with the task list.
+Use the available tools when required.
 
-                    Never claim that a tool succeeded unless
-                    the MCP tool returned a successful result.
-                    """
+Never claim that a tool succeeded unless
+the corresponding tool actually succeeded.
+"""
 
-    # --------------------------------------------------------
-    # START MCP SERVER
-    # --------------------------------------------------------
+    model = ChatGroq(
+        model="openai/gpt-oss-120b",
+        api_key=os.environ["GROQ_API_KEY"],
+        temperature=0
+    )
 
-    async with stdio_client(server_params) as (read,write):
+    async with stdio_client(server_params) as (read, write):
+
         async with ClientSession(read, write) as session:
-            # ------------------------------------------------
-            # INITIALIZE MCP
-            # ------------------------------------------------
+
             await session.initialize()
-            # ------------------------------------------------
-            # DISCOVER TOOLS
-            # ------------------------------------------------
-            mcp_tools = await session.list_tools()
-            tools = []
-            for tool in mcp_tools.tools:
-                tools.append({
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description or "",
-                        "parameters": tool.input_schema
-                    }
-                })
 
-            # ------------------------------------------------
-            # INITIAL MESSAGES
-            # ------------------------------------------------
+            # MCP Adapter:
+            # Converts MCP tools into LangChain tools
+            tools = await load_mcp_tools(session)
 
-            messages = [
-                {
-                    "role": "system",
-                    "content": system_prompt
-                },
-                {
-                    "role": "user",
-                    "content": user_query
-                }
-
-            ]
-
-            # ------------------------------------------------
-            # AGENT LOOP
-            # ------------------------------------------------
-
-            MAX_STEPS = 5
-
-            for step in range(MAX_STEPS):
-
-                print(
-                    f"\n--- Agent Step {step + 1} ---"
-                )
-
-                response = client.chat.completions.create(
-                        model="openai/gpt-oss-120b",
-                        messages=messages,
-                        tools=tools,
-                        tool_choice="auto"
-                )
-                message = response.choices[0].message
-
-                # --------------------------------------------
-                # NO TOOL CALL
-                # --------------------------------------------
-
-                if not message.tool_calls:
-                    return message.content
-
-                # --------------------------------------------
-                # STORE ASSISTANT MESSAGE
-                # --------------------------------------------
-                messages.append(message)
-                # --------------------------------------------
-                # EXECUTE MCP TOOLS
-                # --------------------------------------------
-                for tool_call in message.tool_calls:
-
-                    tool_name = (tool_call.function.name)
-                    arguments = tool_call.function.arguments
-                    print(f"Tool selected: {tool_name}")
-                    print(f"Arguments: {arguments}")
-
-                    # ----------------------------------------
-                    # CALL MCP TOOL
-                    # ----------------------------------------
-
-                    result = await session.call_tool(tool_name, arguments=__import__("json").loads(arguments))
-
-                    # ----------------------------------------
-                    # EXTRACT RESULT
-                    # ----------------------------------------
-                    result_text = "\n".join(item.text for item in result.content if hasattr(item, "text"))
-                    print(f"Tool result: {result_text}" )
-
-                    # ----------------------------------------
-                    # SEND RESULT TO LLM
-                    # ----------------------------------------
-
-                    messages.append({ "role": "tool",
-                                      "tool_call_id": tool_call.id,
-                                      "content": result_text
-                                    })
-            return (
-                "Agent reached maximum "
-                "number of steps."
+            agent = create_agent(
+                model=model,
+                tools=tools,
+                system_prompt=system_prompt
             )
+
+            result = await agent.ainvoke(
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": user_query
+                        }
+                    ]
+                }
+            )
+
+            messages = result["messages"]
+
+            trajectory = []
+
+            for message in messages:
+
+                # -------------------------
+                # LLM MESSAGE
+                # -------------------------
+                if hasattr(message, "tool_calls") and message.tool_calls:
+
+                    for tool_call in message.tool_calls:
+
+                        trajectory.append({
+                            "type": "tool_call",
+                            "tool": tool_call["name"],
+                            "arguments": tool_call["args"]
+                        })
+
+                # -------------------------
+                # TOOL RESULT
+                # -------------------------
+                elif message.__class__.__name__ == "ToolMessage":
+
+                    trajectory.append({
+                        "type": "tool_result",
+                        "tool": getattr(message, "name", None),
+                        "result": message.content
+                    })
+
+            final_answer = messages[-1].content
+
+            return {
+                "user_query": user_query,
+                "trajectory": trajectory,
+                "final_answer": final_answer
+            }
